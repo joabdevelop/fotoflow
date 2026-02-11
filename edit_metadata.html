@@ -1,0 +1,62 @@
+<?php
+
+// C:\laragon\www\photoflow\edit_metadata.php
+
+// Se houver POST, salvamos o arquivo fisicamente
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $fileName = $_POST['original_file'];
+    $jsonPath = "C:/Users/jcfab/Downloads/" . $fileName . "_metadados.json";
+    
+    $newData = [
+        "originalFilename" => $fileName,
+        "photo_name" => $_POST['photo_name'],
+        "description" => $_POST['description'],
+        "origin" => $_POST['origin'],
+        "sourceUrl" => $_POST['sourceUrl'],
+        "updatedAt" => date('c')
+    ];
+
+    file_put_contents($jsonPath, json_encode($newData, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES));
+    echo "<script>alert('Salvo com sucesso!'); window.close();</script>";
+}
+
+// Pega dados da URL (enviados pela extensão)
+$file = $_GET['file'] ?? '';
+$origin = $_GET['origin'] ?? '';
+$sourceUrl = $_GET['url'] ?? '';
+?>
+
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Editar Metadados</title>
+    <style>
+        body { font-family: sans-serif; background: #f0f2f5; display: flex; justify-content: center; padding: 50px; }
+        .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); width: 400px; }
+        input, textarea { width: 100%; margin-bottom: 15px; padding: 10px; box-sizing: border-box; border: 1px solid #ddd; }
+        button { width: 100%; padding: 10px; background: #28a745; color: white; border: none; border-radius: 4px; cursor: pointer; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h3>Editar Metadados</h3>
+        <form method="POST">
+            <input type="hidden" name="original_file" value="<?= htmlspecialchars($file) ?>">
+            
+            <label>Nome do Arquivo:</label>
+            <input type="text" value="<?= htmlspecialchars($file) ?>" disabled>
+
+            <label>Nome da Foto:</label>
+            <input type="text" name="photo_name" placeholder="Ex: Viagem Santos" required>
+
+            <label>Descrição:</label>
+            <textarea name="description" rows="4"></textarea>
+
+            <input type="hidden" name="origin" value="<?= htmlspecialchars($origin) ?>">
+            <input type="hidden" name="sourceUrl" value="<?= htmlspecialchars($sourceUrl) ?>">
+
+            <button type="submit">Gravar Alterações no Arquivo</button>
+        </form>
+    </div>
+</body>
+</html>
