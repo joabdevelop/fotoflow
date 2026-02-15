@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Media;
+use App\Models\MediaProcessing;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -12,15 +13,20 @@ class MediaStoreService
 {
     public function process(Request $request, string $path)
     {
-        return DB::transaction(function () use ($request, $path) {
+        // 1. Prepara o Sidecar Completo vindo do Job
+        $sidecarFull = $request->input('sidecar_full') ?? [];
+        $original = $sidecarFull['original_sidecar'] ?? [];
+
+        return DB::transaction(function () use ($request, $path, $sidecarFull, $original) {
             $canonical = $this->resolveCanonicalMetadata($request);
             $gallery = $canonical['media_gallery'] ?? 'Geral';
 
             $finalPath = $path;
 
+            // --- LÓGICA DE MOVIMENTAÇÃO DE ARQUIVO (MANTIDA) ---
             if (str_contains($path, 'inbound/')) {
                 $filename = basename($path);
-                $targetDir = "fotos/{$gallery}";
+                $targetDir = "fotos/{$gallery}"; // Ou "media/{$gallery}" conforme preferir
                 $newLocation = "{$targetDir}/{$filename}";
 
                 if (!Storage::disk('public')->exists($targetDir)) {
@@ -29,10 +35,8 @@ class MediaStoreService
 
                 if (Storage::disk('public')->exists($path)) {
                     if (Storage::disk('public')->move($path, $newLocation)) {
-                        $oldFolder = dirname($path); // Pega o caminho da pasta (ex: inbound/hash_timestamp)
+                        $oldFolder = dirname($path);
                         $finalPath = $newLocation;
-
-                        // Deleta a pasta temporária do inbound se ela estiver vazia
                         if (str_contains($oldFolder, 'inbound/')) {
                             Storage::disk('public')->deleteDirectory($oldFolder);
                         }
@@ -40,9 +44,8 @@ class MediaStoreService
                 }
             }
 
-            // 3. Verifica duplicata exata pelo HASH
-            $existingMedia = \App\Models\Media::where('file_hash', $request->file_hash)->first();
-
+            // --- VERIFICAÇÃO DE DUPLICATA EXATA (MANTIDA) ---
+            $existingMedia = Media::where('file_hash', $request->file_hash)->first();
             if ($existingMedia) {
                 DB::table('copias_hash_exact')->insert([
                     'original_media_id' => $existingMedia->id,
@@ -53,50 +56,103 @@ class MediaStoreService
                     'updated_at' => now(),
                 ]);
 
-                // Se for duplicata, removemos o arquivo (do novo local ou do inbound)
                 if (Storage::disk('public')->exists($finalPath)) {
                     Storage::disk('public')->delete($finalPath);
                 }
 
-                $existingMedia->is_duplicate_upload = true;
                 return $existingMedia;
             }
 
-            // 4. Fluxo Normal: Criação do Registro
+            // --- LÓGICA DE SIMILARIDADE (MANTIDA) ---
             $similar = $this->checkSimilarity($request);
             $mimeType = str_replace('image/jpg', 'image/jpeg', $request->mime_type);
 
             $phashHex = null;
             if ($request->phash) {
-                $phashHex = str_pad(base_convert($request->phash, 2, 16), 16, '0', STR_PAD_LEFT);
+                // Se o phash já vier em Hex do Job, use direto, senão converte
+                $phashHex = strlen($request->phash) === 16 ? $request->phash : str_pad(base_convert($request->phash, 2, 16), 16, '0', STR_PAD_LEFT);
             }
 
-            // Criamos o modelo Media usando os campos que você listou (file_path, phash, etc)
-            $media = \App\Models\Media::create(
+            // --- CRIAÇÃO DO REGISTRO COM NOVOS CAMPOS (ATUALIZADA) ---
+            $media = Media::create(
                 array_merge($canonical, [
                     'file_hash' => $request->file_hash,
                     'phash' => $phashHex,
-                    'file_path' => $finalPath, // AQUI: deve ser fotos/midias/...
+                    'file_path' => $finalPath,
                     'file_size' => $request->file_size,
                     'file_extension' => $request->file_extension,
                     'mime_type' => $mimeType,
                     'source_event' => $request->watch_source_event ?? 'ManualUpload',
+
+                    // Novos Campos EXIF/Hardware
+                    'device_make' => $original['exif']['make'] ?? null,
+                    'device_model' => $original['exif']['model'] ?? null,
+                    'taken_at' => $original['exif']['taken_at'] ?? ($canonical['timestamp'] ?? now()),
+
+                    // Novos Campos Geo
+                    'latitude' => $original['geo']['latitude'] ?? null,
+                    'longitude' => $original['geo']['longitude'] ?? null,
+                    'altitude' => $original['geo']['altitude'] ?? 0,
+
                     'similar_to_id' => $similar['id'] ?? null,
                     'similarity_score' => $similar['score'] ?? null,
                     'is_synced' => false,
-                    'processed_face' => false,
-                    'face_scanned' => false,
+                    'processed_face' => !empty($original['metadata']['face_detection']['data']),
+                    'face_scanned' => true,
                     'is_favorite' => false,
-                    'created_at' => now(),
-                    'updated_at' => now(),
                 ]),
             );
 
-            $this->saveFinalSidecar($media, $request);
+            // --- SALVAMENTO DE FACES (NOVA LÓGICA) ---
+            $faces = $original['metadata']['face_detection']['data'] ?? [];
+            foreach ($faces as $faceData) {
+                $box = $faceData['bounding_box'] ?? [];
+
+                Face::create([
+                    'media_file_id' => $media->id,
+                    'thumbnail_path' => $faceData['thumbnail_filename'] ?? null,
+                    'x' => $box['x'] ?? 0,
+                    'y' => $box['y'] ?? 0,
+                    'w' => $box['w'] ?? 0,
+                    'h' => $box['h'] ?? 0,
+                    // Se o nome (joabe) for importante, você precisará adicionar 'person_name'
+                    // ao $fillable do seu Model Face também.
+                    'face_hash' => md5($faceData['thumbnail_filename'] ?? uniqid()),
+                    'embedding' => [],
+                ]);
+            }
+
+            $this->saveFinalSidecar($media, $sidecarFull);
 
             return $media;
         });
     }
+
+    /**
+     * Move o arquivo da inbound para a estrutura de pastas: public/media/{gallery}/{event}/{filename}
+     */
+    private function moveFilesToFinalDestination($mediaFile, $tempPath)
+    {
+        $fileName = basename($tempPath);
+        $destinationDir = "media/{$mediaFile->media_gallery}/{$mediaFile->source_event}";
+        $destinationPath = "{$destinationDir}/{$fileName}";
+
+        // Garante que a pasta existe
+        if (!Storage::disk('public')->exists($destinationDir)) {
+            Storage::disk('public')->makeDirectory($destinationDir);
+        }
+
+        // Move o arquivo principal
+        Storage::disk('public')->move($tempPath, $destinationPath);
+
+        // Opcional: Você pode mover o metadata.json original para uma subpasta de logs
+        // ou deletar a pasta inbound temporária
+        $tempDir = dirname($tempPath);
+        Storage::disk('public')->deleteDirectory($tempDir);
+
+        return $destinationPath;
+    }
+
     /* ------------------------------------------ */
     /* CANONICAL METADATA */
     /* ------------------------------------------ */

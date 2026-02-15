@@ -2,9 +2,11 @@
 
 namespace App\Services\Media;
 
-use App\Models\MediaProcessing;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\Storage;
+use App\Services\MediaStoreService;
+use App\Models\MediaProcessing;
+use App\Jobs\ProcessMediaJob;
 
 class MediaProcessor
 {
@@ -43,16 +45,23 @@ class MediaProcessor
         Storage::disk('public')->put($sidecarPath, json_encode($finalMetadata, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
 
         // 5. Cria o registro de processamento pendente
-        return MediaProcessing::create([
+        // 5. Cria o registro de processamento pendente
+        $mediaProcessing = MediaProcessing::create([
             'file_hash' => $fileHash,
             'file_path' => $storedFilePath,
             'sidecar_path' => $sidecarPath,
-            'phash' => $finalMetadata['original_sidecar']['phash'] ?? '', // Passa o phash (se houver)
+            'phash' => $finalMetadata['original_sidecar']['phash'] ?? '',
             'best_dist' => $finalMetadata['original_sidecar']['best_dist'] ?? 6,
             'status' => 'pending',
-            'face_thumbnail_path' => '', // Agora aceito se for nullable no banco
+            'face_thumbnail_path' => '',
             'attempts' => 0,
             'processing_started_at' => now(),
         ]);
+
+        // 6. Coloca na fila de execução
+        // Usamos a variável $mediaProcessing que acabamos de criar
+        ProcessMediaJob::dispatch($mediaProcessing->id);
+
+        return $mediaProcessing; // Retorna agora, depois de disparar o Job
     }
 }

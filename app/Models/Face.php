@@ -7,22 +7,19 @@ use Illuminate\Support\Facades\Storage;
 
 class Face extends Model
 {
-    public $timestamps = false;
-    protected $fillable = [
-        'media_file_id',
-        'thumbnail_path',
-        'x',
-        'y',
-        'w',
-        'h',
-        'embedding',
-        'embedding_model',
-        'face_hash'
-    ];
+    protected $fillable = ['media_file_id', 'person_name', 'is_known', 'box', 'thumbnail_path', 'embedding', 'best_dist'];
 
     protected $casts = [
-        'embedding' => 'array', // O Laravel transforma o JSONB do Postgres em Array
+        'box' => 'array', // Crucial: Transforma o JSON do banco em array PHP
+        'embedding' => 'array', // Crucial: Para os vetores da IA
+        'is_known' => 'boolean',
+        'best_dist' => 'float',
     ];
+
+    public function media()
+    {
+        return $this->belongsTo(Media::class, 'media_file_id');
+    }
 
     public function getThumbnailUrlAttribute()
     {

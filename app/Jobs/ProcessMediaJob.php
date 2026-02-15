@@ -12,6 +12,8 @@ use App\Models\MediaProcessing;
 use App\Services\MediaStoreService; // Importante!
 use Illuminate\Support\Facades\Log;
 use Illuminate\Http\Request;
+use App\Services\Media\MetadataResolver; // Importante!
+use App\Services\Media\MediaProcessor; // Importante!
 
 class ProcessMediaJob implements ShouldQueue
 {
@@ -55,7 +57,7 @@ class ProcessMediaJob implements ShouldQueue
                 'mime_type' => Storage::disk('public')->mimeType($task->file_path),
 
                 // Enviamos o canonical inteiro como metadados para o Service salvar no banco
-                'sidecar_json' => json_encode($sidecarContent['canonical'] ?? []),
+                'sidecar_full' => $sidecarContent,
 
                 'watch_gallery' => $gallery,
                 'watch_source_event' => $event,

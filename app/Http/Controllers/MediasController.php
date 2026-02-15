@@ -474,9 +474,8 @@ class MediasController extends Controller
 
 
     // #################################################################################
-    // Função para apagar toda a tabela de mídias e reiniciar o banco
+    // Função para apagar toda a tabela de mídias e reiniciar o banco enquanto em modo TESTE
     // #################################################################################    
-
     public function apagarTabela()
     {
         try {
@@ -487,6 +486,7 @@ class MediasController extends Controller
                 // 2. Limpa as tabelas (O TRUNCATE no MySQL já reseta o auto-incremento)
                 DB::table('copias_hash_exact')->truncate();
                 DB::table('media_files')->truncate();
+                DB::table('media_processings')->truncate();
 
                 // 3. Reabilita verificações
                 DB::statement('SET FOREIGN_KEY_CHECKS = 1');
