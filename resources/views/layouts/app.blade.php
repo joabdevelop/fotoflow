@@ -13,44 +13,6 @@
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">
     <link rel="stylesheet" href="{{ asset('css/style.css') }}">
-
-    <style>
-        .topnav a {
-            color: #ccc;
-            padding: 8px 12px;
-            text-decoration: none;
-            transition: 0.3s;
-            display: flex;
-            align-items: center;
-            border-radius: 4px;
-        }
-
-        .topnav a:hover,
-        .topnav a.active {
-            color: #fff;
-            background-color: #444;
-        }
-
-        .topnav a.active {
-            border-bottom: 2px solid #04AA6D;
-            border-radius: 4px 4px 0 0;
-        }
-
-        .service-status-dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            display: inline-block;
-            margin-right: 5px;
-        }
-
-        /* Ajuste para o formulário de busca não ocupar muito espaço em telas menores */
-        .search-container {
-            flex-grow: 1;
-            max-width: 300px;
-            margin: 0 15px;
-        }
-    </style>
     @stack('styles')
 </head>
 

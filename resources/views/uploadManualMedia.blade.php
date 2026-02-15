@@ -1,5 +1,5 @@
 <x-app-layout name="Upload Manual de Mídia">
-    <div class="container mt-4 background-green-light p-4 rounded shadow-sm">
+    <div class="container mt-4 background-green-dark p-4 rounded shadow-sm">
         <h2>Upload Manual para: <span class="text-primary">{{ $currentGaleria ?? 'Geral' }}</span></h2>
 
         <form id="uploadForm" action="{{ route('media.upload.process.submit') }}" method="POST"
