@@ -64,6 +64,15 @@ Route::middleware(['auth'])->group(function () {
 // Rotas públicas para testes e desenvolvimento
 // #############################################################################
 
+Route::get('/php-check', function() {
+    return [
+        'post_max_size' => ini_get('post_max_size'),
+        'upload_max_filesize' => ini_get('upload_max_filesize'),
+        'max_file_uploads' => ini_get('max_file_uploads'),
+        'memory_limit' => ini_get('memory_limit'),
+        'max_input_time' => ini_get('max_input_time'),
+    ];
+});
 
 
 Route::get('/reset-ia', function () {

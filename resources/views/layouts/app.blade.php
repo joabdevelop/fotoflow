@@ -182,7 +182,7 @@
         </div>
     </div>
 
-    <div class="container-fluid py-3">
+    <div class="container-fluid py-3 background-green-light rounded shadow-sm" style="margin: 15px;">
         {{ $slot }}
     </div>
 

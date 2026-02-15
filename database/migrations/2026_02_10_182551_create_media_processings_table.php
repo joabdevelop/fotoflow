@@ -10,7 +10,6 @@ return new class extends Migration
      * Run the migrations.
      */
     public function up(): void
-    {
         Schema::create('media_processings', function (Blueprint $table) {
             $table->id();
             $table->string('file_hash')->unique(); // ID único da tarefa
@@ -24,7 +23,8 @@ return new class extends Migration
             $table->timestamp('processing_started_at')->nullable();
 
             $table->timestamps();
-        });
+        });    {
+
     }
 
     /**

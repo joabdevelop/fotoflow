@@ -38,3 +38,32 @@ sequenceDiagram
     Note over D: Arquivo removido da Input
 
 # EOF
+
+# fluxo de upload manual
+
+graph TD
+    A[Início: Upload Manual] --> B{Recebe Arquivos}
+    B --> C[Separa Imagens de JSONs]
+    C --> D[Loop: Para cada Imagem]
+    
+    D --> E[Detecta Galeria/Evento via Caminho JS]
+    E --> F[Busca JSON correspondente]
+    F --> G[Extrai Metadados: Google vs Interno]
+    
+    G --> H{Verifica MD5 no Banco}
+    H -- "Já existe" --> I[Registra em CopiaExata]
+    H -- "Novo" --> J[Calcula pHash Binário]
+    
+    J --> K[Salva Foto + Sidecar.json em /inbound]
+    K --> L[Cria registro MediaProcessing: 'pending']
+    L --> M[Dispara ProcessMediaJob]
+    
+    subgraph Fila_Background [Processamento em Segundo Plano]
+        M --> N[Job: Altera status para 'processing']
+        N --> O[Lê Sidecar.json do Inbound]
+        O --> P[Chama MediaStoreService->process]
+        P --> Q[Move arquivo p/ local final e deleta temporários]
+        Q --> R[Remove registro de MediaProcessing]
+    end
+    
+    R --> S[Fim: Mídia Disponível no App]

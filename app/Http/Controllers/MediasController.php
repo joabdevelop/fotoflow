@@ -161,30 +161,33 @@ class MediasController extends Controller
     }
 
 
-    public function openMedia(Request $request)
-    {
-        $queryPath = $request->get('path');
+ public function openMedia(Request $request)
+{
+    $queryPath = $request->get('path');
 
+    if (file_exists($queryPath)) {
+        $extension = strtolower(pathinfo($queryPath, PATHINFO_EXTENSION));
+        $videoExtensions = ['mp4', 'mov', 'avi', 'wmv', 'mkv', 'webp'];
 
-        if (file_exists($queryPath)) {
-            $extension = strtolower(pathinfo($queryPath, PATHINFO_EXTENSION));
-            $videoExtensions = ['mp4', 'mov', 'avi', 'wmv', 'mkv'];
-
-            if (in_array($extension, $videoExtensions)) {
-                // Comando para Vídeos: VLC
-                $command = 'start /b vlc "' . $queryPath . '"';
+        if (in_array($extension, $videoExtensions)) {
+            // Tenta VLC, se falhar usa o padrão do Windows (Reprodutor Multimídia)
+            $command = 'where vlc >nul 2>nul && start /b vlc "' . $queryPath . '" || start "" "' . $queryPath . '"';
+        } else {
+            // Tenta IrfanView, se falhar usa o padrão do Windows (Fotos)
+            $irfanPath = 'C:\Program Files\IrfanView\i_view64.exe';
+            if (file_exists($irfanPath)) {
+                $command = 'start /b "" "' . $irfanPath . '" "' . $queryPath . '"';
             } else {
-                // Comando para Fotos: IrfanView 
-                $command = 'start /b "" "C:\Program Files\IrfanView\i_view64.exe" "' . $queryPath . '"';
+                $command = 'start "" "' . $queryPath . '"';
             }
-
-            shell_exec($command);
-
-            return response()->json(['success' => true]);
         }
 
-        return response()->json(['success' => false, 'message' => 'Arquivo não encontrado']);
+        shell_exec($command);
+        return response()->json(['success' => true]);
     }
+
+    return response()->json(['success' => false, 'message' => 'Arquivo não encontrado']);
+}
 
     public function duplicatesExact()
     {

@@ -9,31 +9,27 @@ use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Storage;
 use App\Models\MediaProcessing;
+use App\Services\MediaStoreService; // Importante!
 use Illuminate\Support\Facades\Log;
+use Illuminate\Http\Request;
 
 class ProcessMediaJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    // Declaramos a propriedade que vai segurar o ID
     protected $taskId;
 
-    /**
-     * O construtor recebe o ID enviado pelo Controller
-     */
     public function __construct($taskId)
     {
         $this->taskId = $taskId;
     }
 
     /**
-     * Execute the job.
+     * Injetamos o MediaStoreService diretamente no handle
      */
-    public function handle(): void
+    public function handle(MediaStoreService $service): void
     {
-        // Agora $this->taskId existe!
         $task = MediaProcessing::find($this->taskId);
-
         if (!$task || $task->status !== 'pending') {
             return;
         }
@@ -41,30 +37,40 @@ class ProcessMediaJob implements ShouldQueue
         $task->update(['status' => 'processing']);
 
         try {
-            // Log para debug (ajuda a ver o BestDist vindo do .ini)
-            Log::info("Processando mídia ID: {$this->taskId} com BestDist: {$task->best_dist}");
+            $sidecarPath = $task->sidecar_path;
+            $sidecarContent = json_decode(Storage::disk('public')->get($sidecarPath), true);
 
-            // --- SEU PROCESSAMENTO AQUI ---
-            // Exemplo: $result = SuaLogica::process($task->file_path, $task->best_dist);
+            // 1. LEITURA DA NOVA ESTRUTURA CANONICAL
+            // Buscamos primeiro no novo padrão, com fallback para o antigo (por segurança)
+            $gallery = $sidecarContent['canonical']['media_gallery'] ?? ($sidecarContent['media_gallery'] ?? 'Manual');
 
-            // Se tudo der certo, deletamos os arquivos físicos
-            if (Storage::exists($task->file_path)) {
-                // Aqui você moveria para a pasta final antes de deletar o temporário
-                // Storage::copy($task->file_path, 'caminho/final/na/galeria.jpg');
-                
-                Storage::delete([$task->file_path, $task->sidecar_path]);
-                
-                // Remove a pasta da transação (inbound/hash_timestamp)
-                $directory = dirname($task->file_path);
-                Storage::deleteDirectory($directory);
-            }
+            $event = $sidecarContent['canonical']['source_event'] ?? ($sidecarContent['source_event'] ?? 'ManualUpload');
 
-            // Elimina o registro da tabela após o sucesso total
-            $task->delete(); 
-            Log::info("Tarefa {$this->taskId} concluída e removida da tabela.");
+            // 2. PREPARAÇÃO DOS DADOS PARA O SERVICE
+            $data = [
+                'file_hash' => $task->file_hash,
+                'phash' => $task->phash, // O phash calculado pelo Controller
+                'file_size' => Storage::disk('public')->size($task->file_path),
+                'file_extension' => pathinfo($task->file_path, PATHINFO_EXTENSION),
+                'mime_type' => Storage::disk('public')->mimeType($task->file_path),
 
+                // Enviamos o canonical inteiro como metadados para o Service salvar no banco
+                'sidecar_json' => json_encode($sidecarContent['canonical'] ?? []),
+
+                'watch_gallery' => $gallery,
+                'watch_source_event' => $event,
+                'best_dist' => $task->best_dist ?? 6,
+            ];
+
+            // 3. EXECUÇÃO DO SERVICE
+            // O service agora moverá o arquivo para: /storage/{gallery}/{event}/{filename}
+            $service->process(new \Illuminate\Http\Request($data), $task->file_path);
+
+            // Sucesso: remove da fila de processamento
+            $task->delete();
         } catch (\Exception $e) {
             Log::error("Erro no Job {$this->taskId}: " . $e->getMessage());
+            Log::error($e->getTraceAsString()); // Útil para debugar se algo quebrar no Service
             $task->update(['status' => 'error']);
         }
     }

@@ -9,6 +9,8 @@ use App\Jobs\ProcessMediaJob;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\DB;
 
 class ManualUploadController extends Controller
 {
@@ -25,123 +27,94 @@ class ManualUploadController extends Controller
      */
     public function processUpload(Request $request)
     {
-        $files = $request->file('mediaFiles');
-        $galleryBase = $request->input('media_gallery', 'Manual');
-
-        // Decodifica os caminhos enviados pelo JS
-        $filePaths = json_decode($request->input('file_paths'), true) ?? [];
-
-        if (!$files) return back()->with('error', 'Arquivos não encontrados.');
-
         $allFiles = [];
-        $jsonFiles = [];
+        // Captura todos os arquivos (Mídias e JSONs)
+        foreach ($request->file('mediaFiles') as $file) {
+            $allFiles[$file->getClientOriginalName()] = $file;
+        }
 
-        foreach ($files as $file) {
-            $originalName = $file->getClientOriginalName();
+        $filePaths = json_decode($request->input('file_paths'), true);
+        $galleryFallback = $request->input('gallery_fallback'); // O valor da tela
+
+        foreach ($request->file('mediaFiles') as $file) {
+            $fileName = $file->getClientOriginalName();
             $extension = strtolower($file->getClientOriginalExtension());
 
+            // Ignora arquivos JSON no loop principal (eles serão lidos dentro do processSingleFile)
             if ($extension === 'json') {
-                // Armazenamos o arquivo JSON
-                $jsonFiles[] = [
-                    'name' => $originalName,
-                    'file' => $file
-                ];
-            } else {
-                $allFiles[$originalName] = $file;
+                continue;
             }
-        }
-        foreach ($allFiles as $name => $file) {
-            if (str_contains($name, '_thumb')) continue;
 
-            // 1. Pega o caminho do JS para definir a galeria/evento
-            $relativePath = $filePaths[$name] ?? '';
-
-          
-            // Normaliza barras para garantir que o explode funcione em qualquer SO
-            $relativePath = str_replace('\\', '/', $relativePath);
+            // Tenta extrair o evento do caminho da pasta (ex: "Viagem/foto.jpg" -> "Viagem")
+            $relativePath = $filePaths[$fileName] ?? '';
             $parts = explode('/', $relativePath);
-            $detectedGallery = (count($parts) >= 3) ? $parts[0] : $galleryBase;
-            $detectedSource  = (count($parts) >= 3) ? $parts[1] : 'Manual Upload';
+            $folderName = count($parts) > 1 ? $parts[count($parts) - 2] : $galleryFallback;
 
-            if (count($parts) > 1) {
-                $detectedGallery = $parts[0]; // Ex: "Viagem Manaus"
-                // Se houver uma subpasta, usa ela. Se não, usa o nome da galeria como evento
-                $detectedSource  = (count($parts) > 2) ? $parts[1] : $parts[0];
-            }
-
-            // 2. BUSCA O JSON (Crucial: Usando a função de prefixo que sugeri)
-            $jsonFile = $this->findMatchingJson($name, $jsonFiles);
-
-            // 3. Extrai os metadados (Passando o arquivo JSON encontrado ou null)
-            $metaData = $this->extractJsonMetadata($name, $jsonFile, $detectedGallery, $detectedSource);
-
-            // 4. Salva no inbound e registra
-            $this->processSingleFile($file, $metaData, $allFiles);
+            // CHAMA O PROCESSAMENTO
+            $this->processSingleFile($file, $allFiles, [
+                'galleryName' => $galleryFallback, // Sugestão da interface
+                'sourceEvent' => $folderName, // Sugestão da pasta
+            ]);
         }
-
-        return back()->with('success', 'Importação enviada para processamento.');
     }
 
     //###############################################################################
     // Função aprimorada para processar um único arquivo, agora com suporte a thumbnails de face
     //###############################################################################
-    private function processSingleFile($file, $metaData, $allFiles)
+    private function processSingleFile(UploadedFile $file, array $allFiles, array $params)
     {
-        $fileHash = hash_file('md5', $file->getRealPath());
+        $galleryName = $params['galleryName'];
+        $sourceEvent = $params['sourceEvent'];
+        $fileName = $file->getClientOriginalName();
 
-        // 1. Checagem de Duplicata
-        $existente = Media::where('file_hash', $fileHash)->first();
-        if ($existente) {
-            CopiaExata::create([
-                'original_media_id' => $existente->id,
-                'file_path' => $file->getRealPath(),
-                'file_name' => $file->getClientOriginalName(),
-                'file_size' => $file->getSize()
-            ]);
-            return;
+        // 1. Hash e pasta inbound
+        $fileHash = strtoupper(md5_file($file->getRealPath()));
+        $tempFolder = 'inbound/' . now()->format('Ymd_His') . '_' . uniqid();
+        $filePath = $file->storeAs($tempFolder, $fileName, 'public');
+
+        // 2. JSON sidecar correspondente
+        $jsonName = $fileName . '.json';
+        $jsonFile = $allFiles[$jsonName] ?? null;
+
+        // 3. Sidecar: COPIAR SEM ALTERAR
+        if ($jsonFile) {
+            $sidecarContent = file_get_contents($jsonFile->getRealPath());
+            dd($sidecarContent);
+        } else {
+            // fallback mínimo
+            $sidecarContent = json_encode(
+                [
+                    'version' => 1,
+                    'source' => 'manual_upload',
+                    'canonical' => [
+                        'media_gallery' => $galleryName,
+                        'source_event' => $sourceEvent,
+                        'title' => $fileName,
+                        'description' => '',
+                        'taken_at' => now()->format('Y-m-d H:i:s'),
+                    ],
+                ],
+                JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE,
+            );
         }
 
-        $phash = $this->calculatePhash($file->getRealPath());
-        $folder = "inbound/{$fileHash}_" . now()->timestamp;
-        $mediaPath = $file->storeAs($folder, $file->getClientOriginalName(), 'public');
+        $sidecarPath = $tempFolder . '/metadata.json';
+        Storage::disk('public')->put($sidecarPath, $sidecarContent);
 
-        // 2. TRATAMENTO DE FACE THUMBNAIL
-        $faceThumbPath = '';
-        $faces = $metaData['canonical']['face_detection']['data'] ?? [];
-        foreach ($faces as $face) {
-            $thumbName = $face['thumbnail_filename'] ?? null;
-            if ($thumbName && isset($allFiles[$thumbName])) {
-                $faceThumbPath = $allFiles[$thumbName]->storeAs($folder, $thumbName, 'public');
-            }
-        }
-
-        // 3. Criação do Sidecar (Usando a chave correta media_gallery)
-        $sidecarData = [
-            'source'        => 'manual_upload',
-            'media_gallery' => $metaData['canonical']['media_gallery'] ?? 'Manual',
-            'file_hash'     => $fileHash,
-            'phash'         => $phash,
-            'metadata'      => $metaData['canonical'],
-            'original_raw'  => $metaData['raw_original'] ?? []
-        ];
-
-        $sidecarPath = "{$folder}/metadata.json";
-        Storage::disk('public')->put($sidecarPath, json_encode($sidecarData, JSON_PRETTY_PRINT));
-
-        // 4. Registro na Fila (Apenas no Banco por enquanto)
-        $processing = MediaProcessing::updateOrCreate(
-            ['file_hash' => $fileHash],
-            [
-                'file_path'    => $mediaPath,
-                'sidecar_path' => $sidecarPath,
-                'status'       => 'pending',
-                'best_dist'    => 6, // [cite: 2026-01-14]
-                'face_thumbnail_path' => $faceThumbPath,
-                'phash'        => $phash
-            ]
-        );
-
-        Log::info("Upload Teste: {$file->getClientOriginalName()} para Galeria: {$sidecarData['media_gallery']}");
+        // 4. Registro para processamento
+        return \App\Models\MediaProcessing::create([
+            'file_hash' => $fileHash,
+            'file_path' => $filePath,
+            'sidecar_path' => $sidecarPath,
+            'face_thumbnail_path' => '',
+            'status' => 'pending',
+            'best_dist' => 0,
+            'attempts' => 0,
+            'last_error' => null,
+            'phash' => '',
+            'status' => 'pending',
+            'processing_started_at' => now(),
+        ]);
     }
 
     /**
@@ -150,7 +123,9 @@ class ManualUploadController extends Controller
     private function calculatePhash($path)
     {
         $img = @imagecreatefromstring(file_get_contents($path));
-        if (!$img) return null;
+        if (!$img) {
+            return null;
+        }
 
         $imgSize = 32;
         $blocks = 8;
@@ -166,15 +141,15 @@ class ManualUploadController extends Controller
         for ($y = 0; $y < $imgSize; $y++) {
             for ($x = 0; $x < $imgSize; $x++) {
                 $rgb = imagecolorat($scaled, $x, $y);
-                $r = ($rgb >> 16) & 0xFF;
-                $g = ($rgb >> 8) & 0xFF;
-                $b = $rgb & 0xFF;
+                $r = ($rgb >> 16) & 0xff;
+                $g = ($rgb >> 8) & 0xff;
+                $b = $rgb & 0xff;
 
                 // Fórmula de cinza do Delphi: (R*299 + G*587 + B*114) div 1000
                 $gray = ($r * 299 + $g * 587 + $b * 114) / 1000;
 
-                $bx = (int)($x / $blockSize);
-                $by = (int)($y / $blockSize);
+                $bx = (int) ($x / $blockSize);
+                $by = (int) ($y / $blockSize);
                 $index = $by * $blocks + $bx;
 
                 $blockAvg[$index] += $gray;
@@ -192,17 +167,17 @@ class ManualUploadController extends Controller
         $globalAvg = $globalAvg / 64;
 
         // 3. Gera o Hash Binário (Igual ao Delphi IntToBin64)
-        $hashBin = "";
+        $hashBin = '';
         for ($i = 0; $i < 64; $i++) {
             // Importante: No Delphi você usou (UInt64(1) shl I), o que preenche da direita para esquerda
             // ou sequencialmente. Para manter a ordem binária idêntica:
-            $hashBin .= ($blockAvg[$i] >= $globalAvg) ? "1" : "0";
+            $hashBin .= $blockAvg[$i] >= $globalAvg ? '1' : '0';
         }
 
         // imagedestroy($img);
         // imagedestroy($scaled);
 
-        // Se o seu banco espera HEX para o bit_count, converta aqui. 
+        // Se o seu banco espera HEX para o bit_count, converta aqui.
         // Se espera a string binária de 64 chars, retorne $hashBin direto.
         // Como o Delphi retorna IntToBin64, vamos manter binário:
         return $hashBin;
@@ -211,70 +186,75 @@ class ManualUploadController extends Controller
     //###############################################################################
     // Função aprimorada para extrair metadados JSON
     //###############################################################################
- private function extractJsonMetadata($fileName, $jsonFile, $galleryName, $sourceEvent)
-{
-    $default = [
-        'type' => 'manual',
-        'canonical' => [
-            'media_gallery' => $galleryName,
-            'source_event'  => $sourceEvent,
-            'description'   => null,
-            'taken_at'      => now()->format('Y-m-d H:i:s'),
-            'face_detection' => ['processed' => false, 'data' => []]
-        ],
-        'raw_original' => null
-    ];
-
-    if (!$jsonFile) return $default;
-
-    $jsonContent = json_decode(file_get_contents($jsonFile->getRealPath()), true);
-    if (json_last_error() !== JSON_ERROR_NONE) return $default;
-
-    $facesData = $jsonContent['canonical']['face_detection']['data'] ?? $jsonContent['faces'] ?? [];
-
-    // --- 1. DETECÇÃO GOOGLE FOTOS (Via Chave googlePhotosOrigin) ---
-    if (isset($jsonContent['googlePhotosOrigin'])) {
-        return [
-            'type' => 'google_photos',
+    private function extractJsonMetadata($fileName, $jsonFile, $galleryFallback, $eventFallback)
+    {
+        // 1. Caso base: Se não houver JSON, usamos o que veio da interface/pasta
+        $default = [
+            'type' => 'manual',
             'canonical' => [
-                'media_gallery' => 'GoogleFotos', // Forçamos conforme sua regra
-                'source_event'  => $galleryName,  // Usamos a pasta de upload (ex: Viagem Manaus)
-                'title'         => $jsonContent['title'] ?? $fileName,
-                'description'   => $jsonContent['description'] ?? "",
-                'taken_at'      => isset($jsonContent['photoTakenTime']['timestamp'])
-                    ? date('Y-m-d H:i:s', (int)$jsonContent['photoTakenTime']['timestamp'])
-                    : now()->format('Y-m-d H:i:s'),
-                'face_detection' => [
-                    'processed' => !empty($facesData),
-                    'data'      => $facesData
-                ]
+                'media_gallery' => $galleryFallback,
+                'source_event' => $eventFallback,
+                'title' => $fileName,
+                'description' => null,
+                'taken_at' => now()->format('Y-m-d H:i:s'),
+                'face_detection' => ['processed' => false, 'data' => []],
             ],
-            'raw_original' => $jsonContent
+            'raw_original' => null,
         ];
-    }
 
-    // --- 2. DETECÇÃO SIDECAR PRÓPRIO (X / INTERNO) ---
-    if (isset($jsonContent['user']['media_gallery']) || isset($jsonContent['source']['source_event'])) {
-        return [
-            'type' => 'internal_format',
-            'canonical' => [
-                'media_gallery' => $jsonContent['user']['media_gallery'] ?? $galleryName,
-                'source_event'  => $jsonContent['source']['source_event'] ?? $sourceEvent,
-                'description'   => $jsonContent['source']['description'] ?? null,
-                'taken_at'      => isset($jsonContent['source']['timestamps']['created'])
-                    ? date('Y-m-d H:i:s', (int)$jsonContent['source']['timestamps']['created'])
-                    : now()->format('Y-m-d H:i:s'),
-                'face_detection' => [
-                    'processed' => !empty($facesData),
-                    'data'      => $facesData
-                ]
-            ],
-            'raw_original' => $jsonContent
-        ];
-    }
+        if (!$jsonFile) {
+            return $default;
+        }
 
-    return $default;
-}
+        $jsonContent = json_decode(file_get_contents($jsonFile->getRealPath()), true);
+        if (json_last_error() !== JSON_ERROR_NONE) {
+            return $default;
+        }
+
+        // Tenta capturar faces de qualquer lugar (canonical ou raiz do JSON)
+        $facesData = $jsonContent['canonical']['face_detection']['data'] ?? ($jsonContent['metadata']['face_detection']['data'] ?? ($jsonContent['faces'] ?? []));
+
+        // --- PRIORIDADE 1: FORMATO CANONICAL (Seu script PowerShell) ---
+        // Se o bloco 'canonical' existe, ele tem precedência TOTAL sobre a interface.
+        if (isset($jsonContent['canonical'])) {
+            return [
+                'type' => 'canonical_sidecar',
+                'canonical' => [
+                    // Aqui está o segredo: priorizamos o valor interno do JSON
+                    'media_gallery' => $jsonContent['canonical']['media_gallery'] ?? $galleryFallback,
+                    'source_event' => $jsonContent['canonical']['source_event'] ?? $eventFallback,
+                    'title' => $jsonContent['canonical']['title'] ?? $fileName,
+                    'description' => $jsonContent['canonical']['description'] ?? null,
+                    'taken_at' => $jsonContent['canonical']['taken_at'] ?? now()->format('Y-m-d H:i:s'),
+                    'face_detection' => [
+                        'processed' => !empty($facesData),
+                        'data' => $facesData,
+                    ],
+                ],
+                'raw_original' => $jsonContent,
+            ];
+        }
+
+        // --- PRIORIDADE 2: GOOGLE FOTOS ---
+        if (isset($jsonContent['googlePhotosOrigin'])) {
+            return [
+                'type' => 'google_photos',
+                'canonical' => [
+                    'media_gallery' => 'GoogleFotos',
+                    'source_event' => $galleryFallback, // Usa a pasta como subevento
+                    'title' => $jsonContent['title'] ?? $fileName,
+                    'description' => $jsonContent['description'] ?? '',
+                    'taken_at' => isset($jsonContent['photoTakenTime']['timestamp']) ? date('Y-m-d H:i:s', (int) $jsonContent['photoTakenTime']['timestamp']) : now()->format('Y-m-d H:i:s'),
+                    'face_detection' => ['processed' => !empty($facesData), 'data' => $facesData],
+                ],
+                'raw_original' => $jsonContent,
+            ];
+        }
+
+        // Se o JSON existir mas não tiver os formatos acima, retorna o default enriquecido com o raw
+        $default['raw_original'] = $jsonContent;
+        return $default;
+    }
     // ###############################################################################
     // Função aprimorada para encontrar o JSON correspondente a uma mídia, usando lógica de prefixo
     // ###############################################################################
