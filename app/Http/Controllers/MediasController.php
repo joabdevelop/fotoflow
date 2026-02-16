@@ -3,26 +3,27 @@
 namespace App\Http\Controllers;
 
 use App\Models\Media;
+use App\Models\Face;
+use App\Models\CopiaExata;
+use App\Models\MediaProcessing;
 use App\Services\ServiceControl;
-use Illuminate\Support\Facades\File;
-use Illuminate\Support\Facades\Process;
+use Illuminate\Support\Facades\File;use Illuminate\Support\Facades\Process;
 use Illuminate\Support\Str;
 use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Schema;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use App\Jobs\ProcessMediaJob;
-use App\Models\CopiaExata;
+use App\Services\Media\MetadataResolver;
+use App\Services\Media\MediaProcessor;
 
 class MediasController extends Controller
 {
     public function index(Request $request)
     {
         // 1. Busca galerias (Simplificado)
-        $galerias = Media::whereNotNull('media_gallery')
-            ->distinct()
-            ->orderBy('media_gallery', 'asc')
-            ->pluck('media_gallery');
+        $galerias = Media::whereNotNull('media_gallery')->distinct()->orderBy('media_gallery', 'asc')->pluck('media_gallery');
 
         // 2. Lógica de Sessão / Galeria Atual (Extraído lógica para manter clareza)
         $currentGaleria = $this->resolveCurrentGaleria($request, $galerias);
@@ -78,7 +79,9 @@ class MediasController extends Controller
         }
 
         $sessionGaleria = session('selected_galeria');
-        if ($sessionGaleria) return $sessionGaleria;
+        if ($sessionGaleria) {
+            return $sessionGaleria;
+        }
 
         // Se não houver nada, define o padrão (Primeira que não seja 'Priv')
         if ($galerias->isNotEmpty()) {
@@ -95,8 +98,6 @@ class MediasController extends Controller
         return view('uploadManualMedia');
     }
 
-
-
     public function updateMedia(Request $request)
     {
         //  Log::info("Iniciando atualização de mídia com dados: " . json_encode($request->all()));
@@ -108,16 +109,18 @@ class MediasController extends Controller
         }
 
         $validatedData = $request->validate([
-            'title'    => 'nullable|string|max:100',
+            'title' => 'nullable|string|max:100',
             'media_gallery' => 'nullable|string|max:100',
-            'description'   => 'nullable|string|max:150',
-            'source_event'  => 'nullable|string|max:100',
-            'is_private'       => 'nullable',
+            'description' => 'nullable|string|max:150',
+            'source_event' => 'nullable|string|max:100',
+            'is_private' => 'nullable',
         ]);
 
         // Função interna para limpar apenas caracteres proibidos pelo Windows
         $sanitize = function ($text) {
-            if (!$text) return '';
+            if (!$text) {
+                return '';
+            }
             // Remove caracteres que o Windows não aceita em nomes de arquivos
             return preg_replace('/[\/\\\\\:\*\?\"\<\>\|]/', '', $text);
         };
@@ -128,30 +131,23 @@ class MediasController extends Controller
 
         // 2. Montagem do nome preservando espaços
         // Formato: gallery-origin-name-description-id.ext
-        $parts = [
-            $sanitize($validatedData['media_gallery'] ?? 'Sem Galeria'),
-            $sanitize($validatedData['source_event'] ?? 'Sem Evento'),
-            $sanitize($validatedData['title'] ?? 'Sem Nome'),
-            $sanitize(Str::limit($validatedData['description'] ?? 'Sem Descricao', 50, '')),
-            $id
-        ];
+        $parts = [$sanitize($validatedData['media_gallery'] ?? 'Sem Galeria'), $sanitize($validatedData['source_event'] ?? 'Sem Evento'), $sanitize($validatedData['title'] ?? 'Sem Nome'), $sanitize(Str::limit($validatedData['description'] ?? 'Sem Descricao', 50, '')), $id];
 
         $newName = implode(' - ', $parts) . '.' . $extension;
         $newPath = $directory . DIRECTORY_SEPARATOR . $newName;
 
         try {
-
             if ($oldPath !== $newPath && File::exists($oldPath)) {
                 File::move($oldPath, $newPath);
             }
 
             $media->update([
-                'title'    => $validatedData['title'],
+                'title' => $validatedData['title'],
                 'media_gallery' => $validatedData['media_gallery'],
-                'description'   => $validatedData['description'],
-                'source_event'  => $validatedData['source_event'],
-                'is_private'       => $validatedData['is_private'],
-                'file_path'     => $newPath,
+                'description' => $validatedData['description'],
+                'source_event' => $validatedData['source_event'],
+                'is_private' => $validatedData['is_private'],
+                'file_path' => $newPath,
             ]);
 
             return response()->json(['success' => true, 'message' => 'Renomeado: ' . $newName]);
@@ -160,34 +156,33 @@ class MediasController extends Controller
         }
     }
 
+    public function openMedia(Request $request)
+    {
+        $queryPath = $request->get('path');
 
- public function openMedia(Request $request)
-{
-    $queryPath = $request->get('path');
+        if (file_exists($queryPath)) {
+            $extension = strtolower(pathinfo($queryPath, PATHINFO_EXTENSION));
+            $videoExtensions = ['mp4', 'mov', 'avi', 'wmv', 'mkv', 'webp'];
 
-    if (file_exists($queryPath)) {
-        $extension = strtolower(pathinfo($queryPath, PATHINFO_EXTENSION));
-        $videoExtensions = ['mp4', 'mov', 'avi', 'wmv', 'mkv', 'webp'];
-
-        if (in_array($extension, $videoExtensions)) {
-            // Tenta VLC, se falhar usa o padrão do Windows (Reprodutor Multimídia)
-            $command = 'where vlc >nul 2>nul && start /b vlc "' . $queryPath . '" || start "" "' . $queryPath . '"';
-        } else {
-            // Tenta IrfanView, se falhar usa o padrão do Windows (Fotos)
-            $irfanPath = 'C:\Program Files\IrfanView\i_view64.exe';
-            if (file_exists($irfanPath)) {
-                $command = 'start /b "" "' . $irfanPath . '" "' . $queryPath . '"';
+            if (in_array($extension, $videoExtensions)) {
+                // Tenta VLC, se falhar usa o padrão do Windows (Reprodutor Multimídia)
+                $command = 'where vlc >nul 2>nul && start /b vlc "' . $queryPath . '" || start "" "' . $queryPath . '"';
             } else {
-                $command = 'start "" "' . $queryPath . '"';
+                // Tenta IrfanView, se falhar usa o padrão do Windows (Fotos)
+                $irfanPath = 'C:\Program Files\IrfanView\i_view64.exe';
+                if (file_exists($irfanPath)) {
+                    $command = 'start /b "" "' . $irfanPath . '" "' . $queryPath . '"';
+                } else {
+                    $command = 'start "" "' . $queryPath . '"';
+                }
             }
+
+            shell_exec($command);
+            return response()->json(['success' => true]);
         }
 
-        shell_exec($command);
-        return response()->json(['success' => true]);
+        return response()->json(['success' => false, 'message' => 'Arquivo não encontrado']);
     }
-
-    return response()->json(['success' => false, 'message' => 'Arquivo não encontrado']);
-}
 
     public function duplicatesExact()
     {
@@ -199,16 +194,18 @@ class MediasController extends Controller
         return view('duplicatesexact', compact('originals'));
     }
 
-
     public function destroy($id)
     {
         $media = Media::find($id);
 
         if (!$media) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Arquivo não encontrado.'
-            ], 404);
+            return response()->json(
+                [
+                    'success' => false,
+                    'message' => 'Arquivo não encontrado.',
+                ],
+                404,
+            );
         }
 
         try {
@@ -226,19 +223,22 @@ class MediasController extends Controller
 
             return response()->json([
                 'success' => true,
-                'message' => 'Removido com sucesso!'
+                'message' => 'Removido com sucesso!',
             ]);
         } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Erro: ' . $e->getMessage()
-            ], 500);
+            return response()->json(
+                [
+                    'success' => false,
+                    'message' => 'Erro: ' . $e->getMessage(),
+                ],
+                500,
+            );
         }
     }
 
     public function deleteExact($id)
     {
-        Log::info("Solicitação para deletar cópia exata ID: " . $id);
+        Log::info('Solicitação para deletar cópia exata ID: ' . $id);
 
         try {
             $copia = \App\Models\CopiaExata::find($id);
@@ -252,9 +252,9 @@ class MediasController extends Controller
             // 1. Deleta o arquivo físico do Windows
             if (File::exists($path)) {
                 File::delete($path);
-                Log::info("Arquivo deletado fisicamente: " . $path);
+                Log::info('Arquivo deletado fisicamente: ' . $path);
             } else {
-                Log::warning("Arquivo não encontrado fisicamente, mas o registro será removido: " . $path);
+                Log::warning('Arquivo não encontrado fisicamente, mas o registro será removido: ' . $path);
             }
 
             // 2. Remove o registro da tabela copias_hash_exact
@@ -275,7 +275,7 @@ class MediasController extends Controller
 
         return response()->json([
             'success' => true,
-            'message' => 'Todos os duplicados exatos foram removidos'
+            'message' => 'Todos os duplicados exatos foram removidos',
         ]);
     }
 
@@ -311,9 +311,9 @@ class MediasController extends Controller
 
             // Atualiza o registro garantindo que não é mais similar a ninguém
             $media->update([
-                'file_path'        => $finalDestination,
-                'similar_to_id'    => null,
-                'similarity_score' => null
+                'file_path' => $finalDestination,
+                'similar_to_id' => null,
+                'similarity_score' => null,
             ]);
 
             return response()->json(['success' => true]);
@@ -333,8 +333,7 @@ class MediasController extends Controller
         if ($request->filled('search')) {
             $search = $request->get('search');
             $query->where(function ($q) use ($search) {
-                $q->where('title', 'like', "%{$search}%")
-                    ->orWhere('file_name', 'like', "%{$search}%");
+                $q->where('title', 'like', "%{$search}%")->orWhere('file_name', 'like', "%{$search}%");
             });
         }
 
@@ -344,24 +343,23 @@ class MediasController extends Controller
         // 3. Agora buscamos os registros dos PAIS e carregamos seus SIMILARES
         // Isso garante que o ID 2 apareça como cabeçalho do grupo
         $roots = Media::whereIn('id', $parentIds)
-            ->with(['similares' => function ($q) {
-                $q->orderBy('similarity_score', 'asc');
-            }])
+            ->with([
+                'similares' => function ($q) {
+                    $q->orderBy('similarity_score', 'asc');
+                },
+            ])
             ->paginate(30)
             ->appends($request->all());
 
         $grupos = collect();
         foreach ($roots as $root) {
             // Criamos o grupo: O registro original (ID 2) + todos os que apontam para ele
-            $grupos->put(
-                $root->id,
-                collect([$root])->merge($root->similares)
-            );
+            $grupos->put($root->id, collect([$root])->merge($root->similares));
         }
 
         return view('phash', [
-            'grupos'    => $grupos,
-            'paginator' => $roots
+            'grupos' => $grupos,
+            'paginator' => $roots,
         ]);
     }
 
@@ -380,7 +378,7 @@ class MediasController extends Controller
             // Deleta o arquivo físico se ele existir
             if (File::exists($filePath)) {
                 File::delete($filePath);
-                Log::info("Arquivo deletado fisicamente: " . $filePath);
+                Log::info('Arquivo deletado fisicamente: ' . $filePath);
             }
 
             // Deleta o registro no banco de dados
@@ -388,7 +386,7 @@ class MediasController extends Controller
 
             return response()->json(['success' => true]);
         } catch (\Exception $e) {
-            Log::error("Erro ao deletar arquivo: " . $e->getMessage());
+            Log::error('Erro ao deletar arquivo: ' . $e->getMessage());
             return response()->json(['success' => false, 'message' => 'Erro ao deletar: ' . $e->getMessage()], 500);
         }
     }
@@ -405,8 +403,7 @@ class MediasController extends Controller
         if ($request->filled('search')) {
             $search = $request->get('search');
             $query->where(function ($q) use ($search) {
-                $q->where('title', 'like', "%{$search}%")
-                    ->orWhere('description', 'like', "%{$search}%");
+                $q->where('title', 'like', "%{$search}%")->orWhere('description', 'like', "%{$search}%");
             });
         }
 
@@ -414,19 +411,22 @@ class MediasController extends Controller
         $grupos = collect();
 
         foreach ($roots as $root) {
-            // Para cada foto original, buscamos no banco via SQL RAW 
+            // Para cada foto original, buscamos no banco via SQL RAW
             // fotos que estejam no mesmo cenário (distância <= 18)
-            $similaresCenario = DB::select("
-            SELECT *, bit_count(phash # :hash::bit(64)) as dist 
-            FROM media_files 
-            WHERE id != :id 
+            $similaresCenario = DB::select(
+                "
+            SELECT *, bit_count(phash # :hash::bit(64)) as dist
+            FROM media_files
+            WHERE id != :id
             AND bit_count(phash # :hash::bit(64)) <= :limite
             ORDER BY dist ASC
-        ", [
-                'hash' => $root->phash,
-                'id' => $root->id,
-                'limite' => $limiteCenario
-            ]);
+        ",
+                [
+                    'hash' => $root->phash,
+                    'id' => $root->id,
+                    'limite' => $limiteCenario,
+                ],
+            );
 
             // Se encontrou algo no cenário, adicionamos ao grupo
             if (!empty($similaresCenario)) {
@@ -434,13 +434,13 @@ class MediasController extends Controller
             }
         }
 
-        return view('phash', [ // Reutiliza a view de phash
-            'grupos'    => $grupos,
+        return view('phash', [
+            // Reutiliza a view de phash
+            'grupos' => $grupos,
             'paginator' => $roots,
-            'titulo'    => 'Mesmo Cenário (Ambiente)'
+            'titulo' => 'Mesmo Cenário (Ambiente)',
         ]);
     }
-
 
     // Alterna o status de favorito
     public function toggleFavorite($id)
@@ -451,7 +451,7 @@ class MediasController extends Controller
 
         return response()->json([
             'success' => true,
-            'is_favorite' => $media->is_favorite
+            'is_favorite' => $media->is_favorite,
         ]);
     }
 
@@ -472,30 +472,31 @@ class MediasController extends Controller
         return view('favorites', compact('arquivos'));
     }
 
-
     // #################################################################################
     // Função para apagar toda a tabela de mídias e reiniciar o banco enquanto em modo TESTE
-    // #################################################################################    
+    // #################################################################################
     public function apagarTabela()
     {
         try {
-            DB::transaction(function () {
-                // 1. Desabilita verificação de chaves estrangeiras (MySQL)
-                DB::statement('SET FOREIGN_KEY_CHECKS = 0');
+            // Desabilita chaves estrangeiras fora da transação para evitar conflitos no MySQL
+            DB::statement('SET FOREIGN_KEY_CHECKS = 0');
 
-                // 2. Limpa as tabelas (O TRUNCATE no MySQL já reseta o auto-incremento)
-                DB::table('copias_hash_exact')->truncate();
-                DB::table('media_files')->truncate();
-                DB::table('media_processings')->truncate();
+            DB::table('media_processings')->truncate();
+            DB::table('faces')->truncate();
+            DB::table('copias_hash_exact')->truncate();
+            DB::table('media_files')->truncate();
 
-                // 3. Reabilita verificações
-                DB::statement('SET FOREIGN_KEY_CHECKS = 1');
-            });
+            // Se houver uma tabela de jobs do Laravel
+            if (Schema::hasTable('jobs')) {
+                DB::table('jobs')->truncate();
+            }
 
-            return redirect()->route('media.index')->with('status', 'Banco de dados resetado!');
+            DB::statement('SET FOREIGN_KEY_CHECKS = 1');
+
+            return redirect()->back()->with('status', 'Banco resetado com sucesso!');
         } catch (\Exception $e) {
-            Log::error("Erro ao resetar o banco: " . $e->getMessage());
-            return redirect()->route('media.index')->with('error', 'Erro ao processar a limpeza.');
+            Log::error('Erro ao resetar o banco: ' . $e->getMessage());
+            return redirect()->back()->with('error', 'Erro ao resetar.');
         }
     }
 
@@ -516,7 +517,7 @@ class MediasController extends Controller
 
         // DEBUG: Vamos ver no log do Laravel exatamente o que o PHP está tentando ler
         if (!file_exists($fullPath)) {
-            Log::error("Arquivo não encontrado no Windows: " . $fullPath);
+            Log::error('Arquivo não encontrado no Windows: ' . $fullPath);
             return response()->json(['error' => 'Arquivo não encontrado no disco', 'path_tentado' => $fullPath], 404);
         }
 
@@ -527,7 +528,7 @@ class MediasController extends Controller
             // Para vídeos (MP4, etc)
             return response()->file($fullPath, [
                 'Content-Type' => $mime,
-                'Accept-Ranges' => 'bytes'
+                'Accept-Ranges' => 'bytes',
             ]);
         }
 
@@ -541,10 +542,9 @@ class MediasController extends Controller
     public function update(Request $request, ServiceControl $serviceControl)
     {
         $result = $serviceControl->handle('MediaHashService', $request->action);
-        Log::info("Ação de serviço: " . $request->action . " Resultado: " . json_encode($result));
+        Log::info('Ação de serviço: ' . $request->action . ' Resultado: ' . json_encode($result));
         return response()->json($result);
     }
-
 
     public function startStopService($name, $action)
     {
@@ -568,26 +568,31 @@ class MediasController extends Controller
 
             $result = Process::run($command);
 
-            Log::info("Resultado do comando: " . $result->output());
+            Log::info('Resultado do comando: ' . $result->output());
 
             if ($result->successful()) {
                 Log::info("Serviço {$name} alterado para {$action} com sucesso.");
                 return response()->json([
                     'success' => true,
-                    'message' => "Serviço {$name} recebeu o comando {$action}."
+                    'message' => "Serviço {$name} recebeu o comando {$action}.",
                 ]);
             }
 
-            return response()->json([
-                'success' => false,
-                'message' => 'Erro de permissão ou serviço inexistente: ' . $result->errorOutput()
-            ], 500);
+            return response()->json(
+                [
+                    'success' => false,
+                    'message' => 'Erro de permissão ou serviço inexistente: ' . $result->errorOutput(),
+                ],
+                500,
+            );
         } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Erro interno: ' . $e->getMessage()
-            ], 500);
+            return response()->json(
+                [
+                    'success' => false,
+                    'message' => 'Erro interno: ' . $e->getMessage(),
+                ],
+                500,
+            );
         }
     }
-
 }

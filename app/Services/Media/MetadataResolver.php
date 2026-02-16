@@ -61,6 +61,7 @@ class MetadataResolver
                 'source_event' => $jsonContent['canonical']['source_event'] ?? $eventFallback,
                 'title' => $jsonContent['canonical']['title'] ?? $fileName,
                 'description' => $originalMetadata['description'] ?? '',
+                'rating' => $jsonContent['canonical']['rating'] ?? ($originalMetadata['rating'] ?? 0),
                 'taken_at' => $originalMetadata['taken_at'] ?? now()->format('Y-m-d H:i:s'),
                 'faces' => $originalMetadata['face_detection']['data'] ?? [],
                 'phash' => $originalPhash,
@@ -98,6 +99,7 @@ class MetadataResolver
                 'source_event' => $json['canonical']['source_event'] ?? $eFallback,
                 'title' => $json['canonical']['title'] ?? $fileName,
                 'description' => $json['canonical']['description'] ?? null,
+                'rating' => $json['canonical']['rating'] ?? 0,
                 'taken_at' => $json['canonical']['taken_at'] ?? now()->format('Y-m-d H:i:s'),
                 'faces' => $facesData,
                 'raw' => $json,
@@ -112,6 +114,7 @@ class MetadataResolver
                 'source_event' => $gFallback, // Usa a pasta principal como sub-evento
                 'title' => $json['title'] ?? $fileName,
                 'description' => $json['description'] ?? '',
+                'rating' => $json['rating'] ?? 0,
                 'taken_at' => isset($json['photoTakenTime']['timestamp']) ? date('Y-m-d H:i:s', (int) $json['photoTakenTime']['timestamp']) : now()->format('Y-m-d H:i:s'),
                 'faces' => $facesData,
                 'raw' => $json,
@@ -152,6 +155,7 @@ class MetadataResolver
             'source_event' => $event,
             'title' => $fileName,
             'description' => null,
+            'rating' => 0,
             'taken_at' => now()->format('Y-m-d H:i:s'),
             'faces' => [],
             'raw' => null,
@@ -171,6 +175,8 @@ class MetadataResolver
                 'source_event' => $extracted['source_event'] ?? 'Manual',
                 'title' => $extracted['title'] ?? '',
                 'description' => $extracted['description'] ?? '',
+                'rating' => $extracted['rating'] ?? 0,
+                'taken_at' => $extracted['taken_at'] ?? now()->format('Y-m-d H:i:s'),
             ],
             'original_sidecar' => [
                 'version' => 1,
@@ -179,9 +185,10 @@ class MetadataResolver
                 'source_event' => $extracted['source_event'] ?? 'Manual',
                 'file_hash' => $fileHash,
                 'phash' => $extracted['phash'] ?? '',
+                'rating' => $extracted['rating'] ?? 0,
                 'best_dist' => 6,
-                'geo' => $extracted['geo'],
-                'exif' => $extracted['exif'],
+                'geo' => $extracted['geo'] ?? null, // Adicionado null coalescing por segurança
+                'exif' => $extracted['exif'] ?? null,
                 'metadata' => [
                     'description' => $extracted['description'] ?? '',
                     'taken_at' => $extracted['taken_at'] ?? now()->format('Y-m-d H:i:s'),

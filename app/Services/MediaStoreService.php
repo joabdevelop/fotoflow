@@ -3,6 +3,7 @@
 namespace App\Services;
 
 use App\Models\Media;
+use App\Models\Face;
 use App\Models\MediaProcessing;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -23,10 +24,10 @@ class MediaStoreService
 
             $finalPath = $path;
 
-            // --- LÓGICA DE MOVIMENTAÇÃO DE ARQUIVO (MANTIDA) ---
+            // --- LÓGICA DE MOVIMENTAÇÃO DE ARQUIVO ---
             if (str_contains($path, 'inbound/')) {
                 $filename = basename($path);
-                $targetDir = "fotos/{$gallery}"; // Ou "media/{$gallery}" conforme preferir
+                $targetDir = "fotos/{$gallery}";
                 $newLocation = "{$targetDir}/{$filename}";
 
                 if (!Storage::disk('public')->exists($targetDir)) {
@@ -44,7 +45,7 @@ class MediaStoreService
                 }
             }
 
-            // --- VERIFICAÇÃO DE DUPLICATA EXATA (MANTIDA) ---
+            // --- VERIFICAÇÃO DE DUPLICATA EXATA ---
             $existingMedia = Media::where('file_hash', $request->file_hash)->first();
             if ($existingMedia) {
                 DB::table('copias_hash_exact')->insert([
@@ -59,21 +60,17 @@ class MediaStoreService
                 if (Storage::disk('public')->exists($finalPath)) {
                     Storage::disk('public')->delete($finalPath);
                 }
-
                 return $existingMedia;
             }
 
-            // --- LÓGICA DE SIMILARIDADE (MANTIDA) ---
+            // --- LÓGICA DE SIMILARIDADE E PHASH ---
             $similar = $this->checkSimilarity($request);
             $mimeType = str_replace('image/jpg', 'image/jpeg', $request->mime_type);
 
-            $phashHex = null;
-            if ($request->phash) {
-                // Se o phash já vier em Hex do Job, use direto, senão converte
-                $phashHex = strlen($request->phash) === 16 ? $request->phash : str_pad(base_convert($request->phash, 2, 16), 16, '0', STR_PAD_LEFT);
-            }
+            $phashRaw = $request->phash ?? ($original['phash'] ?? null);
+            $phashHex = $phashRaw ? substr($phashRaw, 0, 64) : null;
 
-            // --- CRIAÇÃO DO REGISTRO COM NOVOS CAMPOS (ATUALIZADA) ---
+            // --- CRIAÇÃO DO REGISTRO (COM CORREÇÃO PARA "GEO" E "EXIF") ---
             $media = Media::create(
                 array_merge($canonical, [
                     'file_hash' => $request->file_hash,
@@ -82,14 +79,16 @@ class MediaStoreService
                     'file_size' => $request->file_size,
                     'file_extension' => $request->file_extension,
                     'mime_type' => $mimeType,
-                    'source_event' => $request->watch_source_event ?? 'ManualUpload',
+                    'source_event' => $request->watch_source_event ?? ($original['source_event'] ?? 'ManualUpload'),
 
-                    // Novos Campos EXIF/Hardware
-                    'device_make' => $original['exif']['make'] ?? null,
-                    'device_model' => $original['exif']['model'] ?? null,
-                    'taken_at' => $original['exif']['taken_at'] ?? ($canonical['timestamp'] ?? now()),
+                    // Ajuste de Case (No seu JSON veio 'Make' e 'Model' com maiúsculo)
+                    'device_make' => $original['exif']['Make'] ?? ($original['exif']['make'] ?? null),
+                    'device_model' => $original['exif']['Model'] ?? ($original['exif']['model'] ?? null),
 
-                    // Novos Campos Geo
+                    // Pegando a data resolvida pelo canonical
+                    'taken_at' => $canonical['timestamp'] ?? now(),
+
+                    // CORREÇÃO DO ERRO "GEO": Usando ?? null para o nível 'geo'
                     'latitude' => $original['geo']['latitude'] ?? null,
                     'longitude' => $original['geo']['longitude'] ?? null,
                     'altitude' => $original['geo']['altitude'] ?? 0,
@@ -103,20 +102,24 @@ class MediaStoreService
                 ]),
             );
 
-            // --- SALVAMENTO DE FACES (NOVA LÓGICA) ---
+            // --- SALVAMENTO DE FACES ---
             $faces = $original['metadata']['face_detection']['data'] ?? [];
+            $jobBestDist = $original['best_dist'] ?? null;
+
             foreach ($faces as $faceData) {
                 $box = $faceData['bounding_box'] ?? [];
 
-                Face::create([
+                \App\Models\Face::create([
                     'media_file_id' => $media->id,
                     'thumbnail_path' => $faceData['thumbnail_filename'] ?? null,
-                    'x' => $box['x'] ?? 0,
-                    'y' => $box['y'] ?? 0,
-                    'w' => $box['w'] ?? 0,
-                    'h' => $box['h'] ?? 0,
-                    // Se o nome (joabe) for importante, você precisará adicionar 'person_name'
-                    // ao $fillable do seu Model Face também.
+                    'best_dist' => $faceData['best_dist'] ?? ($faceData['distance'] ?? $jobBestDist),
+                    'person_name' => $faceData['name'] ?? null,
+                    'box' => [
+                        'x' => $box['x'] ?? 0,
+                        'y' => $box['y'] ?? 0,
+                        'w' => $box['w'] ?? 0,
+                        'h' => $box['h'] ?? 0,
+                    ],
                     'face_hash' => md5($faceData['thumbnail_filename'] ?? uniqid()),
                     'embedding' => [],
                 ]);
@@ -131,22 +134,28 @@ class MediaStoreService
     /**
      * Move o arquivo da inbound para a estrutura de pastas: public/media/{gallery}/{event}/{filename}
      */
+    /**
+     * Move o arquivo da inbound para a pasta final e garante o Sidecar JSON
+     */
     private function moveFilesToFinalDestination($mediaFile, $tempPath)
     {
-        $fileName = basename($tempPath);
-        $destinationDir = "media/{$mediaFile->media_gallery}/{$mediaFile->source_event}";
+        $fileName = basename($tempPath); // Nome original da imagem
+        $destinationDir = "fotos/{$mediaFile->media_gallery}"; // Ex: fotos/Pessoal
         $destinationPath = "{$destinationDir}/{$fileName}";
 
-        // Garante que a pasta existe
+        // 1. Garante que a pasta final existe
         if (!Storage::disk('public')->exists($destinationDir)) {
             Storage::disk('public')->makeDirectory($destinationDir);
         }
 
-        // Move o arquivo principal
-        Storage::disk('public')->move($tempPath, $destinationPath);
+        // 2. Move a Imagem Principal
+        if (Storage::disk('public')->exists($tempPath)) {
+            Storage::disk('public')->move($tempPath, $destinationPath);
+        }
 
-        // Opcional: Você pode mover o metadata.json original para uma subpasta de logs
-        // ou deletar a pasta inbound temporária
+        // 3. Deleta a pasta temporária do Inbound
+        // O metadata.json que estava lá será substituído pelo "Final Sidecar"
+        // gerado pelo método saveFinalSidecar que escreve direto na pasta fotos/Pessoal
         $tempDir = dirname($tempPath);
         Storage::disk('public')->deleteDirectory($tempDir);
 
@@ -159,31 +168,22 @@ class MediaStoreService
 
     private function resolveCanonicalMetadata(Request $request)
     {
-        // 1. Tenta pegar o JSON que veio no Request (enviado pelo Job)
-        $sidecarRaw = $request->input('sidecar_json');
-        $sidecar = $sidecarRaw ? json_decode($sidecarRaw, true) : [];
+        $sidecarFull = $request->input('sidecar_full') ?? [];
+        $original = $sidecarFull['original_sidecar'] ?? [];
+        $metadata = $original['metadata'] ?? [];
+        // Tenta pegar do canonical do sidecar, se não tiver, tenta do original_sidecar
+        $rating = $sidecarFull['rating'] ?? ($sidecarFull['canonical']['rating'] ?? ($sidecarFull['original_sidecar']['rating'] ?? ($sidecarFull['original_sidecar']['Rating'] ?? 0)));
 
-        // 2. REGRA DE OURO: Se o Job já mandou o 'watch_gallery' e 'watch_source_event',
-        // nós DEVEMOS usar isso. Eles são a autoridade máxima.
-        $gallery = $request->watch_gallery;
-        $event = $request->watch_source_event;
-
-        // Se por algum motivo estiverem vazios, aí sim tentamos o JSON interno
-        if (!$gallery || $gallery === 'midias') {
-            $gallery = $sidecar['media_gallery'] ?? ($sidecar['user']['media_gallery'] ?? 'Geral');
-        }
-
-        if (!$event || $event === 'midias') {
-            $event = $sidecar['source_event'] ?? ($sidecar['source']['source_event'] ?? 'Raiz');
-        }
+        $original = $sidecarFull['original_sidecar'] ?? $sidecarFull;
+        $metadata = $original['metadata'] ?? [];
 
         return [
-            'media_gallery' => $gallery,
-            'source_event' => $event,
-            'title' => $sidecar['title'] ?? ($request->title ?? 'Sem título'),
-            'description' => $sidecar['description'] ?? $request->description,
-            'rating' => $sidecar['rating'] ?? 0,
-            'timestamp' => $sidecar['taken_at'] ?? ($sidecar['timestamp'] ?? now()),
+            'media_gallery' => $request->watch_gallery ?? ($sidecarFull['canonical']['media_gallery'] ?? 'Geral'),
+            'source_event' => $request->watch_source_event ?? ($sidecarFull['canonical']['source_event'] ?? 'Manual'),
+            'title' => $sidecarFull['canonical']['title'] ?? ($metadata['title'] ?? 'Sem título'),
+            'description' => $sidecarFull['canonical']['description'] ?? ($metadata['description'] ?? null),
+            'rating' => (int) $rating, // GARANTE QUE É UM INTEIRO
+            'timestamp' => $metadata['taken_at'] ?? ($original['exif']['DateTime'] ?? now()),
             'is_private' => $request->boolean('is_private'),
         ];
     }
@@ -233,35 +233,27 @@ class MediaStoreService
     /* ------------------------------------------ */
     /* FINAL SIDECAR */
     /* ------------------------------------------ */
-
-    private function saveFinalSidecar(Media $media, Request $request)
+    // Mude de (Media $media, Request $request) para:
+    private function saveFinalSidecar(Media $media, array $sidecarFull)
     {
-        if (!$request->sidecar_json) {
-            return;
-        }
-
         $path = storage_path("app/public/{$media->file_path}.json");
-
-        // O que o Job enviou como sidecar_json é o nosso "Canonical"
-        $incomingCanonical = json_decode($request->sidecar_json, true);
 
         $finalJson = [
             'version' => 1,
             'media_id' => $media->id,
             'canonical' => [
-                'media_gallery' => $media->media_gallery, // CatCafe
-                'source_event' => $media->source_event, // Moto G-73
-                'title' => $media->title,
-                'description' => $media->description,
-                'taken_at' => $media->timestamp,
+                'media_gallery' => $media->media_gallery,
+                'source_event' => $media->source_event,
+                'title' => $media->title, // Agora virá do banco corrigido
+                'description' => $media->description, // Agora virá do banco corrigido
+                'taken_at' => $media->taken_at,
+                'rating' => $media->rating, // Adicione esta linha se quiser no JSON final
             ],
-            // AQUI ESTÁ O SEGREDO: Não jogue fora o que veio no Request
-            'original_sidecar' => $incomingCanonical,
+            'original_sidecar' => $sidecarFull['original_sidecar'] ?? $sidecarFull,
         ];
 
         file_put_contents($path, json_encode($finalJson, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
     }
-
     // No seu MediaStoreService.php
     public function processFromInbound($data, string $path)
     {

@@ -17,11 +17,7 @@ return new class extends Migration {
             $table->string('name')->nullable()->index();
 
             // Referência para a face que será a "foto do perfil" (thumbnail principal)
-            $table
-                ->foreignId('cover_face_id')
-                ->nullable()
-                ->constrained('faces') // Adicione isso para garantir integridade
-                ->onDelete('set null');
+            $table->foreignId('cover_face_id')->nullable();
 
             // Embedding médio (opcional, para acelerar a busca de novos matches)
             $table->json('representative_embedding')->nullable();

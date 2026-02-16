@@ -20,7 +20,7 @@ return new class extends Migration
                 ->onDelete('cascade'); // Se deletar a foto, deleta as faces detectadas nela
 
             // Relacionamento com a people
-             $table->foreignId('person_id')->nullable()->constrained('people')->onDelete('set null');
+             $table->foreignId('person_id')->nullable();
             // Dados da Face
             $table->json('embedding'); // Vetor da face (compatível com MySQL JSON)
             $table->json('box');       // Coordenadas [x, y, w, h]
